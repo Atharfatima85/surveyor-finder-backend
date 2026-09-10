@@ -6,11 +6,23 @@ const app = express();
 
 const allowedOrigins = process.env.FRONTEND_URL
   ? process.env.FRONTEND_URL.split(',').map((origin) => origin.trim())
-  : true;
+  : [];
 
 app.use(
   cors({
-    origin: allowedOrigins,
+    origin(origin, callback) {
+      if (!origin) {
+        return callback(null, true);
+      }
+      if (
+        allowedOrigins.includes(origin) ||
+        origin.endsWith('.vercel.app') ||
+        origin === 'http://localhost:5173'
+      ) {
+        return callback(null, true);
+      }
+      return callback(null, false);
+    },
   })
 );
 app.use(express.json());
