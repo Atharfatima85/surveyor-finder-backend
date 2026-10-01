@@ -34,29 +34,106 @@ const getRouteForSurveyor = async (surveyor, destLng, destLat) => {
   return data.routes[0];
 };
 
+const POSTCODES_IO_URL = 'https://api.postcodes.io';
+
+const extractPostcode = (text) => {
+  if (!text || typeof text !== 'string') return null;
+  const match = text.match(/\b([A-Z]{1,2}[0-9][A-Z0-9]?\s*[0-9][A-Z]{2})\b/i);
+  return match ? match[1].toUpperCase().replace(/\s+/, ' ') : null;
+};
+
+const extractOutcode = (text) => {
+  if (!text || typeof text !== 'string') return null;
+  const match = text.trim().match(/^([A-Z]{1,2}[0-9][A-Z0-9]?)$/i);
+  return match ? match[1].toUpperCase() : null;
+};
+
+const geocodePostcode = async (postcodeStr) => {
+  try {
+    const clean = postcodeStr.replace(/\s+/g, '');
+    const { data } = await axios.get(
+      `${POSTCODES_IO_URL}/postcodes/${encodeURIComponent(clean)}`,
+      { timeout: 5000 }
+    );
+    if (data.status === 200 && data.result) {
+      return {
+        lat: data.result.latitude,
+        lng: data.result.longitude,
+        postcode: data.result.postcode,
+      };
+    }
+  } catch (err) {
+    try {
+      const cleanOut = postcodeStr.trim().toUpperCase();
+      const { data } = await axios.get(
+        `${POSTCODES_IO_URL}/outcodes/${encodeURIComponent(cleanOut)}`,
+        { timeout: 5000 }
+      );
+      if (data.status === 200 && data.result) {
+        return {
+          lat: data.result.latitude,
+          lng: data.result.longitude,
+          postcode: data.result.outcode,
+        };
+      }
+    } catch (err2) {
+      return null;
+    }
+  }
+  return null;
+};
+
 const geocodeAddress = async (address) => {
-  const { data } = await axios.get(NOMINATIM_URL, {
-    params: {
-      q: address,
-      format: 'json',
-      limit: 1,
-    },
-    headers: {
-      'User-Agent': 'SurveyorFinder/1.0',
-    },
-  });
+  const trimmed = address.trim();
 
-  if (!Array.isArray(data) || data.length === 0) {
-    return null;
+  // 1. Check if query is or contains a UK postcode or outcode
+  const fullPcMatch = extractPostcode(trimmed);
+  const outcodeMatch = extractOutcode(trimmed);
+
+  if (fullPcMatch) {
+    const pcResult = await geocodePostcode(fullPcMatch);
+    if (pcResult) return pcResult;
+  } else if (outcodeMatch) {
+    const outResult = await geocodePostcode(outcodeMatch);
+    if (outResult) return outResult;
   }
 
-  const lat = Number(data[0].lat);
-  const lng = Number(data[0].lon);
-  if (Number.isNaN(lat) || Number.isNaN(lng)) {
+  // 2. Fallback to OpenStreetMap Nominatim with UK priority
+  try {
+    const { data } = await axios.get(NOMINATIM_URL, {
+      params: {
+        q: address,
+        format: 'json',
+        limit: 1,
+        countrycodes: 'gb',
+        addressdetails: 1,
+      },
+      headers: {
+        'User-Agent': 'SurveyorFinder/1.0',
+      },
+      timeout: 6000,
+    });
+
+    if (!Array.isArray(data) || data.length === 0) {
+      return null;
+    }
+
+    const lat = Number(data[0].lat);
+    const lng = Number(data[0].lon);
+    if (Number.isNaN(lat) || Number.isNaN(lng)) {
+      return null;
+    }
+
+    const foundPostcode =
+      data[0].address?.postcode ||
+      extractPostcode(data[0].display_name) ||
+      fullPcMatch ||
+      null;
+
+    return { lat, lng, postcode: foundPostcode };
+  } catch (error) {
     return null;
   }
-
-  return { lat, lng };
 };
 
 const resolveCoordinates = async ({ address, latitude, longitude }) => {
@@ -71,7 +148,11 @@ const resolveCoordinates = async ({ address, latitude, longitude }) => {
   const lng = Number(longitude);
 
   if (hasCoords && !Number.isNaN(lat) && !Number.isNaN(lng)) {
-    return { latitude: lat, longitude: lng };
+    return {
+      latitude: lat,
+      longitude: lng,
+      postcode: extractPostcode(address) || '',
+    };
   }
 
   const location = await geocodeAddress(address);
@@ -79,7 +160,11 @@ const resolveCoordinates = async ({ address, latitude, longitude }) => {
     return null;
   }
 
-  return { latitude: location.lat, longitude: location.lng };
+  return {
+    latitude: location.lat,
+    longitude: location.lng,
+    postcode: location.postcode || extractPostcode(address) || '',
+  };
 };
 
 exports.geocodeSurveyor = async (req, res) => {
@@ -132,6 +217,14 @@ exports.createSurveyor = async (req, res) => {
         .json({ message: 'areas must be an array of strings' });
     }
 
+    const resolvedDays = Array.isArray(req.body.availableDays)
+      ? req.body.availableDays
+      : ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+
+    const resolvedSlots = Array.isArray(req.body.timeSlots)
+      ? req.body.timeSlots
+      : ['Morning', 'Evening'];
+
     const coords = await resolveCoordinates({ address, latitude, longitude });
     if (!coords) {
       return res.status(400).json({
@@ -145,7 +238,10 @@ exports.createSurveyor = async (req, res) => {
       address,
       latitude: coords.latitude,
       longitude: coords.longitude,
+      postcode: req.body.postcode || coords.postcode || extractPostcode(address) || '',
       areas: resolvedAreas,
+      availableDays: resolvedDays,
+      timeSlots: resolvedSlots,
       isAvailable: req.body.isAvailable,
     });
 
@@ -173,6 +269,9 @@ exports.searchSurveyors = async (req, res) => {
         .json({ message: 'Query parameter "address" is required' });
     }
 
+    const day = req.query.day?.trim();
+    const timeSlot = req.query.timeSlot?.trim();
+
     const location = await geocodeAddress(address);
     if (!location) {
       return res.status(404).json({
@@ -182,8 +281,26 @@ exports.searchSurveyors = async (req, res) => {
 
     const destLat = location.lat;
     const destLng = location.lng;
+    const searchPostcode =
+      location.postcode ||
+      extractPostcode(address) ||
+      extractOutcode(address) ||
+      address.trim().toUpperCase();
 
-    const surveyors = await Surveyor.find();
+    let surveyors = await Surveyor.find();
+
+    if (day && day !== 'all') {
+      surveyors = surveyors.filter((s) =>
+        Array.isArray(s.availableDays) && s.availableDays.includes(day)
+      );
+    }
+
+    if (timeSlot && timeSlot !== 'all') {
+      surveyors = surveyors.filter((s) =>
+        Array.isArray(s.timeSlots) && s.timeSlots.includes(timeSlot)
+      );
+    }
+
     if (surveyors.length === 0) {
       return res.json([]);
     }
@@ -202,14 +319,20 @@ exports.searchSurveyors = async (req, res) => {
       .map((surveyor, index) => {
         const route = routes[index];
         const isOk = Boolean(route);
+        const surveyorPostcode =
+          surveyor.postcode || extractPostcode(surveyor.address) || '';
 
         return {
           _id: surveyor._id,
           name: surveyor.name,
           phone: surveyor.phone,
           address: surveyor.address,
+          postcode: surveyorPostcode,
+          searchPostcode: searchPostcode,
           areas: surveyor.areas,
           isAvailable: surveyor.isAvailable,
+          availableDays: surveyor.availableDays || [],
+          timeSlots: surveyor.timeSlots || [],
           distanceText: isOk ? formatDistanceText(route.distance) : null,
           distanceValue: isOk ? route.distance : Number.MAX_SAFE_INTEGER,
           durationText: isOk ? formatDurationText(route.duration) : null,
@@ -291,11 +414,28 @@ exports.updateSurveyor = async (req, res) => {
 
     updates.latitude = coords.latitude;
     updates.longitude = coords.longitude;
+    if (coords.postcode) {
+      updates.postcode = coords.postcode;
+    } else if (updates.address) {
+      updates.postcode = extractPostcode(updates.address) || '';
+    }
 
     if (updates.areas != null && !Array.isArray(updates.areas)) {
       return res
         .status(400)
         .json({ message: 'areas must be an array of strings' });
+    }
+
+    if (updates.availableDays != null && !Array.isArray(updates.availableDays)) {
+      return res
+        .status(400)
+        .json({ message: 'availableDays must be an array of strings' });
+    }
+
+    if (updates.timeSlots != null && !Array.isArray(updates.timeSlots)) {
+      return res
+        .status(400)
+        .json({ message: 'timeSlots must be an array of strings' });
     }
 
     const surveyor = await Surveyor.findByIdAndUpdate(req.params.id, updates, {

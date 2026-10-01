@@ -21,9 +21,21 @@ const surveyorSchema = new mongoose.Schema({
     type: Number,
     required: true,
   },
+  postcode: {
+    type: String,
+    default: '',
+  },
   areas: {
     type: [String],
     default: [],
+  },
+  availableDays: {
+    type: [String],
+    default: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
+  },
+  timeSlots: {
+    type: [String],
+    default: ['Morning', 'Evening'],
   },
   isAvailable: {
     type: Boolean,
