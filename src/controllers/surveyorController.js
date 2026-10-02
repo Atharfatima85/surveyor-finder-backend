@@ -287,7 +287,7 @@ exports.searchSurveyors = async (req, res) => {
       extractOutcode(address) ||
       address.trim().toUpperCase();
 
-    let surveyors = await Surveyor.find();
+    let surveyors = await Surveyor.find({ isAvailable: { $ne: false } });
 
     if (day && day !== 'all') {
       surveyors = surveyors.filter((s) =>
